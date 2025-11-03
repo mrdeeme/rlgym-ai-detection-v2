@@ -1,0 +1,11 @@
+policy_version: 1.4.0
+tiers:
+  low:
+    abstain_band: [0.45, 0.55]
+    ood_threshold: 1.5
+  medium:
+    abstain_band: [0.40, 0.60]
+    ood_threshold: 1.2
+  high:
+    abstain_band: [0.35, 0.65]
+    ood_threshold: 1.0
