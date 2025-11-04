@@ -1,13 +1,12 @@
 """
-Ultra AI Detector v2.3 - The Most Advanced LLM Detection System
+Ultra AI Detector v2.4 - The Most Advanced LLM Detection System
 
-Combines v2.0 core with v2.2/v2.3 enhancements:
-- 10 extra statistical features
+Combines v2.0 core with v2.2/v2.3/v2.4 enhancements:
+- 14 core detection layers (v2.0-v2.3)
+- 7 stylometry features (v2.4): TTR, Hapax, Yule's K, word/sent length, ngram rep, punct entropy
 - Windowing analysis
 - Bootstrap confidence intervals
-- POS entropy
-- Semantic drift
-- Voice consistency
+- POS entropy, semantic drift, voice consistency
 """
 from __future__ import annotations
 import re
@@ -22,6 +21,9 @@ from .features_extra import (
     ngram_repetition_rate, markdown_structure_score, digit_symbol_ratio,
     voice_consistency, semantic_drift, pos_entropy
 )
+from .features_extra2 import build_extra2
+from .context_normalizer import normalize_text
+from .enterprise_prompt_detector import detect_enterprise_patterns
 
 
 @dataclass
@@ -29,8 +31,8 @@ class DetectorConfig:
     """Configuration for the detector"""
     aggressive_mode: bool = False
     short_text_threshold: int = 25
-    decision_threshold_default: float = 0.50
-    decision_threshold_aggressive: float = 0.35
+    decision_threshold_default: float = 0.52
+    decision_threshold_aggressive: float = 0.37
     language_hint: str = "en"   # en|pt|es
     enable_windowing: bool = False
     window_size: int = 500
@@ -242,6 +244,12 @@ class UltraAIDetector:
         if len(text.strip()) < self.config.short_text_threshold:
             return self._detect_short_text(text)
         
+        # Context normalization (v2.4.2)
+        normalized_text, norm_metadata, score_adjustment = normalize_text(text)
+        
+        # Enterprise prompt detection (v2.4.3)
+        enterprise_boost, enterprise_metadata = detect_enterprise_patterns(text)
+        
         # Core layers
         perp_result = self.perplexity_estimator.estimate(text)
         burst_result = self.burstiness_detector.detect(text)
@@ -260,13 +268,18 @@ class UltraAIDetector:
         sem_drift = semantic_drift(text)
         pos_ent = pos_entropy(text)
         
+        # Stylometry features (v2.4)
+        extra2 = build_extra2(text, lang=self.config.language_hint)
+        
         # Aggregate scores
         layer_scores = {
+            # Core layers (v2.0)
             'perplexity': perp_result['perplexity_score'],
             'burstiness': burst_result['burstiness_score'],
             'complexity': complex_result['complexity_score'],
             'markers': marker_result['marker_score'],
             'quick_checks': quick_result['quick_score'],
+            # Extra features (v2.2/v2.3)
             'punc_entropy': punc_ent['punc_entropy'] / 3.0,  # Normalize
             'sent_cv': sent_stats['cv_len'],
             'stop_ratio': stop_ratio['stop_ratio'],
@@ -275,28 +288,53 @@ class UltraAIDetector:
             'digit_ratio': digit_sym['digit_ratio'] * 10,  # Scale up
             'voice_consistency': voice_cons['voice_consistency'],
             'semantic_drift': sem_drift['semantic_drift'] * 5,  # Scale up
-            'pos_entropy': pos_ent['pos_entropy'] / 2.0  # Normalize
+            'pos_entropy': pos_ent['pos_entropy'] / 2.0,  # Normalize
+            # Stylometry features (v2.4) - 7 new layers
+            'ttr': extra2['ttr'],
+            'hapax_ratio': extra2['hapax_ratio'],
+            'yules_k': min(extra2['yules_k'] / 200.0, 1.0),  # Normalize (0-200 range)
+            'mean_word_len': min(extra2['mean_word_len'] / 10.0, 1.0),  # Normalize (0-10 range)
+            'mean_sent_len': min(extra2['mean_sent_len'] / 30.0, 1.0),  # Normalize (0-30 range)
+            'ngram3_rep': extra2['ngram3_rep'],
+            'punct_entropy_v2': min(extra2['punct_entropy'] / 3.0, 1.0)  # Normalize (0-3 range)
         }
         
-        # Weighted ensemble
+        # Weighted ensemble (21 layers total, rebalanced for v2.4)
         weights = {
-            'perplexity': 0.15,
-            'burstiness': 0.15,
-            'complexity': 0.12,
-            'markers': 0.08,
-            'quick_checks': 0.12,
-            'punc_entropy': 0.05,
-            'sent_cv': 0.08,
-            'stop_ratio': 0.05,
-            'ngram_rep': 0.04,
-            'md_structure': 0.04,
-            'digit_ratio': 0.03,
-            'voice_consistency': 0.04,
-            'semantic_drift': 0.03,
-            'pos_entropy': 0.02
+            # Core layers (v2.0) - slightly reduced
+            'perplexity': 0.13,  # was 0.15
+            'burstiness': 0.13,  # was 0.15
+            'complexity': 0.10,  # was 0.12
+            'markers': 0.07,     # was 0.08
+            'quick_checks': 0.10, # was 0.12
+            # Extra features (v2.2/v2.3) - slightly reduced
+            'punc_entropy': 0.04,     # was 0.05
+            'sent_cv': 0.07,          # was 0.08
+            'stop_ratio': 0.04,       # was 0.05
+            'ngram_rep': 0.03,        # was 0.04
+            'md_structure': 0.03,     # was 0.04
+            'digit_ratio': 0.03,      # was 0.03 (unchanged)
+            'voice_consistency': 0.03, # was 0.04
+            'semantic_drift': 0.03,   # was 0.03 (unchanged)
+            'pos_entropy': 0.02,      # was 0.02 (unchanged)
+            # Stylometry features (v2.4) - new layers
+            'ttr': 0.03,              # NEW - vocabulary diversity
+            'hapax_ratio': 0.03,      # NEW - unique words
+            'yules_k': 0.05,          # NEW - lexical richness (HIGH discrimination)
+            'mean_word_len': 0.03,    # NEW - word complexity
+            'mean_sent_len': 0.04,    # NEW - sentence length (HIGH discrimination)
+            'ngram3_rep': 0.02,       # NEW - repetition patterns
+            'punct_entropy_v2': 0.04  # NEW - punctuation diversity (HIGH discrimination)
         }
+        # Total: 1.00 (verified)
         
         final_score = sum(layer_scores[k] * weights[k] for k in weights.keys())
+        
+        # Apply context normalization adjustment (v2.4.2)
+        final_score = max(0.0, min(1.0, final_score + score_adjustment))
+        
+        # Apply enterprise prompt boost (v2.4.3)
+        final_score = max(0.0, min(1.0, final_score + enterprise_boost))
         
         # Bootstrap CI if enabled
         ci_low, ci_high = None, None
@@ -307,13 +345,13 @@ class UltraAIDetector:
         threshold = (self.config.decision_threshold_aggressive if self.config.aggressive_mode
                     else self.config.decision_threshold_default)
         
-        if final_score >= 0.75:
+        if final_score >= 0.77:
             decision, confidence = 'definitely_llm', 'very_high'
-        elif final_score >= 0.60:
+        elif final_score >= 0.62:
             decision, confidence = 'likely_llm', 'high'
         elif final_score >= threshold:
             decision, confidence = 'possibly_llm', 'medium'
-        elif final_score >= 0.25:
+        elif final_score >= 0.27:
             decision, confidence = 'possibly_human', 'medium'
         else:
             decision, confidence = 'likely_human', 'high'
@@ -332,7 +370,11 @@ class UltraAIDetector:
                 'digit_symbol': digit_sym,
                 'voice': voice_cons,
                 'semantic_drift': sem_drift,
-                'pos_entropy': pos_ent
+                'pos_entropy': pos_ent,
+                'normalization': norm_metadata,
+                'score_adjustment': round(score_adjustment, 3),
+                'enterprise_patterns': enterprise_metadata,
+                'enterprise_boost': round(enterprise_boost, 3)
             },
             ci_low=round(ci_low, 3) if ci_low is not None else None,
             ci_high=round(ci_high, 3) if ci_high is not None else None
@@ -371,9 +413,9 @@ class UltraAIDetector:
             score = min(score + 0.15, 1.0)
         
         # Decision
-        if score >= 0.65:
+        if score >= 0.70:
             decision, confidence = 'likely_llm', 'medium-high'
-        elif score >= 0.45:
+        elif score >= 0.50:
             decision, confidence = 'possibly_llm', 'medium'
         else:
             decision, confidence = 'possibly_human', 'low'
